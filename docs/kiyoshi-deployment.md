@@ -14,9 +14,11 @@ GitHub Actions has not been configured for deployment.
 
 Email Routing is enabled with a catch-all to `hpc-cloud-mail`. The new domain's
 registration was confirmed through RDAP, but on 2026-11-06 public DNS still
-returned NXDOMAIN, so the public site and end-to-end mail delivery were not yet
-verified. Verify the registry delegation, TLS, admin login and real incoming mail
-before using the addresses for account recovery.
+returned NXDOMAIN. A temporary `workers.dev` route was used to verify admin login,
+closed registration, and the domain configuration, then disabled. The custom
+domain's TLS and real incoming mail were not yet verified. Verify registry
+delegation, custom-domain TLS and real incoming mail before using addresses for
+account recovery.
 
 ## Manual update
 
