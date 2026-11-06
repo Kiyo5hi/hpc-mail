@@ -13,13 +13,10 @@ GitHub Actions has not been configured for deployment.
   held in owner-only files under `~/.config/hpc-mail/`; never commit their contents.
 
 Email Routing is enabled with a catch-all to `hpc-cloud-mail`. On 2026-11-06,
-the registered domain began resolving publicly, but the custom-domain TLS
-handshake still failed. A temporary route at
-`https://hpc-cloud-mail.kiyoshi-fyi.workers.dev` is enabled; HTTPS and admin login
-were verified there, and registration is closed. After custom-domain TLS is
-working, disable the Worker's `workers.dev` route and verify real incoming mail
-before using addresses for account recovery. This temporary route is internet
-accessible and requires the same administrator login as the custom domain.
+the custom-domain TLS certificate became valid and HTTPS and admin login were
+verified. The temporary `workers.dev` route and preview URLs were disabled;
+registration remains closed. Real incoming mail has not been independently
+verified. Verify delivery before using addresses for account recovery.
 
 ## Manual update
 
