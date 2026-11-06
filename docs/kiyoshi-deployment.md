@@ -12,13 +12,14 @@ GitHub Actions has not been configured for deployment.
 - Initial administrator username is `admin`. The initial password and JWT secret are
   held in owner-only files under `~/.config/hpc-mail/`; never commit their contents.
 
-Email Routing is enabled with a catch-all to `hpc-cloud-mail`. The new domain's
-registration was confirmed through RDAP, but on 2026-11-06 public DNS still
-returned NXDOMAIN. A temporary `workers.dev` route was used to verify admin login,
-closed registration, and the domain configuration, then disabled. The custom
-domain's TLS and real incoming mail were not yet verified. Verify registry
-delegation, custom-domain TLS and real incoming mail before using addresses for
-account recovery.
+Email Routing is enabled with a catch-all to `hpc-cloud-mail`. On 2026-11-06,
+the registered domain began resolving publicly, but the custom-domain TLS
+handshake still failed. A temporary route at
+`https://hpc-cloud-mail.kiyoshi-fyi.workers.dev` is enabled; HTTPS and admin login
+were verified there, and registration is closed. After custom-domain TLS is
+working, disable the Worker's `workers.dev` route and verify real incoming mail
+before using addresses for account recovery. This temporary route is internet
+accessible and requires the same administrator login as the custom domain.
 
 ## Manual update
 
