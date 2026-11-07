@@ -15,8 +15,11 @@ GitHub Actions has not been configured for deployment.
 Email Routing is enabled with a catch-all to `hpc-cloud-mail`. On 2026-11-06,
 the custom-domain TLS certificate became valid and HTTPS and admin login were
 verified. The temporary `workers.dev` route and preview URLs were disabled;
-registration remains closed. Real incoming mail has not been independently
-verified. Verify delivery before using addresses for account recovery.
+registration remains closed. On 2026-11-07, after the configured external
+destination was verified in Cloudflare, one test email from the existing
+notification sender arrived at an unclaimed address. HPC Mail recorded the
+message as received and the native forward as succeeded. The final destination
+inbox had not yet been independently checked.
 
 ## Manual update
 
