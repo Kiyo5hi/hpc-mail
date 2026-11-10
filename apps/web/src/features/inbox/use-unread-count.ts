@@ -1,4 +1,4 @@
-import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type QueryClient, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useSyncExternalStore } from 'react';
 import { queryKeys } from '@/api/query-keys';
 import { messageApi } from '@/api/resources';
@@ -73,11 +73,8 @@ function useListPolling(client: QueryClient): boolean {
   return useSyncExternalStore(subscribe, () => pollersOf(client).count > 0, () => false);
 }
 
-/** 未读收件数（用户自己认领地址）。key 在 messages 前缀下，读/删/星标失效会连带刷新。 */
-export function useUnreadCount() {
-  const client = useQueryClient();
-  const listPolling = useListPolling(client);
-  return useQuery({
+export function unreadCountQueryOptions(client: QueryClient) {
+  return queryOptions({
     queryKey: queryKeys.messages.unreadCount,
     queryFn: async () => {
       const result = await messageApi.unreadCount();
@@ -85,6 +82,15 @@ export function useUnreadCount() {
       return result;
     },
     staleTime: POLL_INTERVAL_MS,
+  });
+}
+
+/** 未读收件数（用户自己认领地址）。key 在 messages 前缀下，读/删/星标失效会连带刷新。 */
+export function useUnreadCount() {
+  const client = useQueryClient();
+  const listPolling = useListPolling(client);
+  return useQuery({
+    ...unreadCountQueryOptions(client),
     // 列表视图在轮询时由 sync 写入未读数：暂停自身的定时、聚焦与恢复联网刷新，每轮只发一个请求
     refetchInterval: listPolling ? false : POLL_INTERVAL_MS,
     refetchOnWindowFocus: !listPolling,

@@ -62,6 +62,7 @@ describe('bootPrefetch', () => {
     bootPrefetch(queryClient, { pathname: '/login', search: '' });
     expect(api.config).toHaveBeenCalledTimes(1);
     expect(api.me).not.toHaveBeenCalled();
+    expect(api.unread).not.toHaveBeenCalled();
     expect(loaders.shell).not.toHaveBeenCalled();
     expect(cachedHashes()).toEqual([hashKey(queryKeys.config)]);
   });
@@ -93,6 +94,21 @@ describe('bootPrefetch', () => {
     expect(api.mailboxes).toHaveBeenCalledTimes(1);
     expect(api.shared).toHaveBeenCalledTimes(1);
     expect(api.domains).toHaveBeenCalledTimes(1);
+    expect(api.unread).toHaveBeenCalledTimes(1);
+  });
+
+  it('会话仍在验证时已请求未读数，页面挂载后复用该请求', async () => {
+    localStorage.setItem('token', 'token-1');
+    let releaseSession!: (value: { id: number; username: string; role: string }) => void;
+    api.me.mockImplementationOnce(() => new Promise(resolve => { releaseSession = resolve; }));
+    bootPrefetch(queryClient, { pathname: '/inbox', search: '' });
+    expect(api.me).toHaveBeenCalledTimes(1);
+    expect(api.unread).toHaveBeenCalledTimes(1);
+    expect(api.list).toHaveBeenCalledTimes(1);
+    releaseSession({ id: 1, username: 'me', role: 'user' });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter><InboxPage /></MemoryRouter></QueryClientProvider>);
+    await waitFor(() => expect(api.mailboxes).toHaveBeenCalledTimes(1));
+    expect(api.unread).toHaveBeenCalledTimes(1);
   });
 
   it('根路径重定向到不带筛选的收件箱', () => {

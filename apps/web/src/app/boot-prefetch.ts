@@ -1,6 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { inboxListQuery, parseInboxFilters } from '@/features/inbox/inbox-query';
 import { parseMailView } from '@/features/inbox/mail-view';
+import { unreadCountQueryOptions } from '@/features/inbox/use-unread-count';
 import { messageDetailQueryOptions, messageListQueryOptions } from '@/features/inbox/message-queries';
 import { mailboxesQueryOptions, sharedMailboxesQueryOptions } from '@/features/mailboxes/use-mailboxes';
 import { getAuthRevision, getAuthToken } from '@/lib/auth-token';
@@ -18,6 +19,7 @@ import { loadAppShell, normalizePathname, routeLoaderFor, warmModule } from './r
 export function prefetchAuthedRoute(client: QueryClient, rawPathname: string, search = ''): void {
   const pathname = normalizePathname(rawPathname);
   warmModule(loadAppShell);
+  void client.prefetchQuery(unreadCountQueryOptions(client));
   const loadRoute = routeLoaderFor(pathname);
   if (loadRoute) warmModule(loadRoute);
   const params = new URLSearchParams(search);
