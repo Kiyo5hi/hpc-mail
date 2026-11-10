@@ -10,7 +10,7 @@
 
 ## 重要限制：worker 集成测试只能在 CI 跑
 
-`apps/worker/test/*.test.ts` 依赖 `@cloudflare/vitest-pool-workers`（workerd），宿主机需要 **glibc ≥ 2.32**（Ubuntu 22.04+）。glibc 过旧的机器上这些测试起不来，请依赖 PR 的 CI 结果兜底；`packages/shared` 与 `apps/web` 的单测不受影响，可本地运行。
+`apps/worker/test/*.test.ts` 依赖 `@cloudflare/vitest-plugin`（workerd），宿主机需要 **glibc ≥ 2.32**（Ubuntu 22.04+）。glibc 过旧的机器上这些测试起不来，请依赖 PR 的 CI 结果兜底；`packages/shared` 与 `apps/web` 的单测不受影响，可本地运行。
 
 ## 提交 PR 前
 
@@ -19,6 +19,7 @@
 3. 改了 `/v1` 开放 API（端点、字段、认证）→ 同步更新 `apps/web/public/skill.md`
 4. 数据库改动走 Drizzle 增量迁移（`pnpm --filter @hpc-mail/worker db:generate`），不修改历史迁移文件
 5. 项目没有 ESLint：`tsc` 的 strict + `noUnusedLocals/Parameters` 兼作静态检查
+6. `pnpm audit` 检查运行时和开发依赖；CI 会阻止高危及严重告警。工作区中的定向 overrides 用于修补尚未更新的间接依赖，更新父包后检查是否可以移除。
 
 提交信息建议使用 [Conventional Commits](https://www.conventionalcommits.org/)：
 
