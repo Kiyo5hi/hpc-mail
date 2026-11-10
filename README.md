@@ -33,6 +33,16 @@
 
 ---
 
+## 已有生产环境的普通发布
+
+普通更新使用 `.github/workflows/deploy.yml` 或 `pnpm deploy`。它们只更新应用与静态资源，不执行 SQL、不创建管理员、不重置数据库、不覆盖 Worker secrets。GitHub 流程保留现有 Variables 门槛；未配置的仓库继续跳过部署，本轮脚本整理不要求接入新凭据。
+
+发布前根据线上 `x-hpc-build` 与目标提交比较迁移目录；有新增、修改或删除的迁移文件时自动发布会停止。先通过受控的维护步骤执行并验证迁移，再手动运行发布流程并勾选 `migrations_applied`。无法识别线上提交或缺少其 Git 历史时也会停止，需要先核对当前部署版本。
+
+首次安装或人工修复使用手动的 `Initialize or repair HPC Mail` 工作流，或明确的 `deploy:initialize` 命令。旧的数据库初始化、secret 写入、管理员引导和重置入口只在这条维护路径保留。`reset_database` 默认为 false；它会清空 D1/KV，只适用于明确需要重新初始化的环境。
+
+普通发布冒烟只读取公开配置、检查匿名 API 拒绝和缺失静态资源 404，不登录账号、不读取邮箱、不写入测试邮件。已有 Cloudflare OAuth 登录仍可用于人工发布；常规 GitHub 发布所需凭据与参数见下方原有配置说明。
+
 ## HPC Mail 是什么
 
 HPC Mail 是一个完全跑在 Cloudflare 上的邮箱系统。它用 **Email Routing（收件）+ Workers（处理）+ D1 / KV / R2（存储）** 组合出，可选接入一个 OpenAI 兼容大模型（如 DeepSeek）做验证码兜底识别与邮件翻译，完整的多域名、多用户邮件服务——没有 SMTP 服务器要维护，没有 VPS 要续费。收件、阅读和站内互投的日常用量基本落在 Cloudflare 免费额度内；外发到任意外部地址需要 Workers Paid 计划。

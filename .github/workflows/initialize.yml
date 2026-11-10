@@ -1,0 +1,233 @@
+name: Initialize or repair HPC Mail (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reset_database:
+        type: boolean
+        default: false
+        description: '仅初始化/人工修复时使用：清空 D1/KV 后重新初始化'
+
+concurrency:
+  group: hpc-mail-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+  KV_NAMESPACE_ID: ${{ vars.KV_NAMESPACE_ID }}
+  D1_NAME: hpc-cloud-mail-db
+
+jobs:
+  deploy:
+    # 一键部署克隆出的仓库不配 Variables，自动跳过本工作流（不产生失败标记）
+    if: github.ref == 'refs/heads/main' && vars.CLOUDFLARE_ACCOUNT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验部署参数
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
+        run: |
+          set -euo pipefail
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo '::error::缺 CLOUDFLARE_API_TOKEN'; exit 1; }
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo '::error::缺 Variable CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+          [ -n "$D1_DATABASE_ID" ] || { echo '::error::缺 Variable D1_DATABASE_ID'; exit 1; }
+          [ -n "$KV_NAMESPACE_ID" ] || { echo '::error::缺 Variable KV_NAMESPACE_ID'; exit 1; }
+          [ -n "$CUSTOM_DOMAIN" ] || { echo '::error::缺 Variable CUSTOM_DOMAIN'; exit 1; }
+          echo "$JWT_SECRET" | grep -qE '^[A-Za-z0-9_-]{43,}$' || { echo '::error::JWT_SECRET 需为 43+ 位 URL-safe 字符串'; exit 1; }
+          plen=${#ADMIN_PASSWORD}
+          [ "$plen" -ge 12 ] && [ "$plen" -le 128 ] || { echo '::error::ADMIN_PASSWORD 需 12-128 位'; exit 1; }
+          echo "$ADMIN_USERNAME" | grep -qE '^[a-z0-9][a-z0-9_-]{2,31}$' || { echo '::error::ADMIN_USERNAME 非法'; exit 1; }
+          echo "::add-mask::$JWT_SECRET"
+          echo "::add-mask::$ADMIN_PASSWORD"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: shared 测试与类型检查
+        run: |
+          pnpm --filter @hpc-mail/shared test
+          pnpm --filter @hpc-mail/shared typecheck
+
+      - name: web 测试、类型检查与构建
+        run: |
+          pnpm --filter @hpc-mail/web test
+          pnpm --filter @hpc-mail/web typecheck
+          pnpm --filter @hpc-mail/web build
+
+      - name: 禁止 sourcemap 进产物
+        run: |
+          maps=$(find apps/web/dist -name '*.map' | wc -l)
+          [ "$maps" = "0" ] || { echo '::error::产物包含 sourcemap'; exit 1; }
+
+      - name: 拷贝前端产物进 worker
+        run: pnpm --filter @hpc-mail/worker build:assets
+
+      - name: worker 测试与类型检查
+        run: |
+          pnpm --filter @hpc-mail/worker test
+          pnpm --filter @hpc-mail/worker typecheck
+
+      - name: 依赖安全审计
+        run: pnpm audit --prod --audit-level high
+
+      - name: 注入 Cloudflare 资源配置
+        working-directory: apps/worker
+        env:
+          D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
+          BUILD_SHA: ${{ github.sha }}
+          PLACEMENT_REGION: ${{ vars.PLACEMENT_REGION }}
+        run: |
+          set -euo pipefail
+          sed -i \
+            -e "s/__D1_DATABASE_ID__/${D1_DATABASE_ID}/" \
+            -e "s/__KV_NAMESPACE_ID__/${KV_NAMESPACE_ID}/" \
+            -e "s|site_origin = \"https://hpc.email\"|site_origin = \"https://${CUSTOM_DOMAIN}\"|" \
+            -e "s|build_sha = \"local\"|build_sha = \"${BUILD_SHA}\"|" \
+            -e "s|^workers_dev = true$|workers_dev = false\nroutes = [ { pattern = \"${CUSTOM_DOMAIN}\", custom_domain = true } ]|" \
+            wrangler.toml
+          grep -qE '__[A-Z0-9_]+__' wrangler.toml && { echo '::error::wrangler.toml 仍有未注入占位符'; exit 1; } || true
+          grep -q 'workers_dev = false' wrangler.toml || { echo '::error::routes/workers_dev 注入失败'; exit 1; }
+          # 可选 placement：把 Worker 固定到 D1 主库附近（如 aws:ap-southeast-1）；模板不写死，未设置则跳过
+          if [ -n "$PLACEMENT_REGION" ]; then
+            echo "$PLACEMENT_REGION" | grep -qE '^[a-z0-9]+:[a-z0-9-]+$' || { echo "::error::PLACEMENT_REGION 格式非法（应形如 aws:ap-southeast-1）"; exit 1; }
+            grep -qx '\[placement\]' wrangler.toml && { echo '::error::wrangler.toml 已存在 [placement] 段'; exit 1; } || true
+            printf '\n[placement]\nregion = "%s"\n' "$PLACEMENT_REGION" >> wrangler.toml
+            grep -qx '\[placement\]' wrangler.toml && grep -qx "region = \"$PLACEMENT_REGION\"" wrangler.toml || { echo '::error::placement 注入失败'; exit 1; }
+            echo "placement region: $PLACEMENT_REGION"
+          else
+            echo '::notice::未设置 PLACEMENT_REGION，跳过 placement 注入'
+          fi
+          # 现存哈希资源由边缘直出、不绕到 placement 区域；缺失文件仍经 Worker 返回 404（build:assets 已在前面执行）
+          node scripts/inject-asset-routes.mjs
+          rules=$(grep -E '^run_worker_first' wrangler.toml | grep -o '"[^"]*"' | wc -l)
+          excluded=$(grep -E '^run_worker_first' wrangler.toml | grep -o '"!/assets/[^"]*"' | wc -l)
+          echo "run_worker_first 共 $rules 条，静态资源排除 $excluded 条"
+          [ "$rules" -le 100 ] || { echo '::error::run_worker_first 超过 Cloudflare 100 条上限'; exit 1; }
+          grep -E '^run_worker_first' wrangler.toml | grep -q '"/assets/\*"' || { echo '::error::run_worker_first 缺少 /assets/* 兜底规则'; exit 1; }
+
+      - name: 部署预演（dry-run）
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy --dry-run
+
+      - name: 清空线上 D1 与 KV（仅 reset_database=true）
+        if: github.event_name == 'workflow_dispatch' && inputs.reset_database
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo '::warning::正在清空线上数据库与 KV'
+          npx wrangler d1 execute "$D1_NAME" --remote -y --file=scripts/drop-legacy.sql
+          npx wrangler kv key list --namespace-id "$KV_NAMESPACE_ID" > /tmp/kv-keys.json
+          count=$(jq 'length' /tmp/kv-keys.json)
+          if [ "$count" -gt 0 ]; then
+            jq -c '[.[].name]' /tmp/kv-keys.json > /tmp/kv-del.json
+            npx wrangler kv bulk delete /tmp/kv-del.json --namespace-id "$KV_NAMESPACE_ID" --force
+          fi
+          echo "已清空 D1 旧表与 $count 个 KV key"
+
+      - name: 记录 D1 回滚书签
+        if: github.event_name != 'workflow_dispatch' || !inputs.reset_database
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx wrangler d1 time-travel info "$D1_NAME" --json > /tmp/d1-time-travel.json
+          bookmark=$(jq -r '.. | .bookmark? // empty' /tmp/d1-time-travel.json | head -n 1)
+          [ -n "$bookmark" ] || { echo '::error::未能取得 D1 Time Travel bookmark'; exit 1; }
+          echo "D1 rollback bookmark: $bookmark" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::D1 rollback bookmark 已写入 Job Summary"
+
+      - name: 应用数据库迁移
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler d1 migrations apply "$D1_NAME" --remote
+
+      - name: 部署 Worker
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy
+
+      - name: 同步 Worker secrets
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CF_HOSTED_DOMAINS_TOKEN: ${{ secrets.CF_HOSTED_DOMAINS_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$JWT_SECRET" | npx wrangler secret put jwt_secret
+          # 可选：托管域名使用的站长 Cloudflare 凭据；未设置时功能保持隐藏
+          if [ -n "$CF_HOSTED_DOMAINS_TOKEN" ]; then
+            echo "$CF_HOSTED_DOMAINS_TOKEN" | npx wrangler secret put cf_api_token
+            echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put cf_account_id
+          else
+            echo '::notice::未设置 CF_HOSTED_DOMAINS_TOKEN，托管域名功能保持关闭'
+          fi
+
+      - name: 校验迁移完整性
+        working-directory: apps/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          expected=$(ls migrations/*.sql | wc -l)
+          applied=$(npx wrangler d1 execute "$D1_NAME" --remote --json \
+            --command 'SELECT COUNT(*) AS c FROM d1_migrations' | jq '.[0].results[0].c')
+          echo "migrations: 代码 $expected / 线上 $applied"
+          [ "$expected" = "$applied" ] || { echo '::error::线上迁移数与代码不一致'; exit 1; }
+
+      - name: 引导管理员账号（幂等）
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: node apps/worker/scripts/seed-admin.mjs
+
+      - name: 等待新版本全球生效
+        env:
+          BUILD_SHA: ${{ github.sha }}
+          BASE_URL: https://${{ vars.CUSTOM_DOMAIN }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 24); do
+            if curl -sS -D /tmp/hpc-config.headers "$BASE_URL/api/config" | jq -e '.data.registrationMode' >/dev/null 2>&1 && tr -d '\r' < /tmp/hpc-config.headers | grep -qi "^x-hpc-build: $BUILD_SHA$"; then
+              echo "新版本已生效（第 $i 次探测）"
+              exit 0
+            fi
+            echo "等待部署传播…（$i/24）"
+            sleep 10
+          done
+          echo '::error::240s 内新版本未生效'
+          exit 1
+
+      - name: 线上冒烟
+        env:
+          BASE_URL: https://${{ vars.CUSTOM_DOMAIN }}
+          ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: bash scripts/smoke.sh
