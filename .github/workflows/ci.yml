@@ -22,6 +22,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: node --test scripts/check-production-flow.test.mjs
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build

@@ -13,10 +13,10 @@ on:
       - pnpm-workspace.yaml
   workflow_dispatch:
     inputs:
-      reset_database:
+      migrations_applied:
         type: boolean
         default: false
-        description: '危险：清空线上 D1 全部表与 KV 后从零迁移（仅首次上线）'
+        description: '迁移文件有变更时，仅在已单独执行并验证迁移后启用'
 
 concurrency:
   group: hpc-mail-production
@@ -33,33 +33,26 @@ env:
 jobs:
   deploy:
     # 一键部署克隆出的仓库不配 Variables，自动跳过本工作流（不产生失败标记）
-    if: vars.CLOUDFLARE_ACCOUNT_ID != ''
+    if: github.ref == 'refs/heads/main' && vars.CLOUDFLARE_ACCOUNT_ID != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 校验部署参数
+      - name: 校验普通发布参数
         env:
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-          ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
           CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
         run: |
           set -euo pipefail
           [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo '::error::缺 CLOUDFLARE_API_TOKEN'; exit 1; }
-          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo '::error::缺 Variable CLOUDFLARE_ACCOUNT_ID'; exit 1; }
-          [ -n "$D1_DATABASE_ID" ] || { echo '::error::缺 Variable D1_DATABASE_ID'; exit 1; }
-          [ -n "$KV_NAMESPACE_ID" ] || { echo '::error::缺 Variable KV_NAMESPACE_ID'; exit 1; }
-          [ -n "$CUSTOM_DOMAIN" ] || { echo '::error::缺 Variable CUSTOM_DOMAIN'; exit 1; }
-          echo "$JWT_SECRET" | grep -qE '^[A-Za-z0-9_-]{43,}$' || { echo '::error::JWT_SECRET 需为 43+ 位 URL-safe 字符串'; exit 1; }
-          plen=${#ADMIN_PASSWORD}
-          [ "$plen" -ge 12 ] && [ "$plen" -le 128 ] || { echo '::error::ADMIN_PASSWORD 需 12-128 位'; exit 1; }
-          echo "$ADMIN_USERNAME" | grep -qE '^[a-z0-9][a-z0-9_-]{2,31}$' || { echo '::error::ADMIN_USERNAME 非法'; exit 1; }
-          echo "::add-mask::$JWT_SECRET"
-          echo "::add-mask::$ADMIN_PASSWORD"
+          echo "$CLOUDFLARE_ACCOUNT_ID" | grep -qE '^[a-f0-9]{32}$'
+          echo "$KV_NAMESPACE_ID" | grep -qE '^[a-f0-9]{32}$'
+          echo "$D1_DATABASE_ID" | grep -qE '^[a-f0-9-]{36}$'
+          echo "$CUSTOM_DOMAIN" | grep -qE '^[a-z0-9]+([.-][a-z0-9]+)+$'
 
       - uses: pnpm/action-setup@v4
 
@@ -112,7 +105,7 @@ jobs:
             -e "s/__KV_NAMESPACE_ID__/${KV_NAMESPACE_ID}/" \
             -e "s|site_origin = \"https://hpc.email\"|site_origin = \"https://${CUSTOM_DOMAIN}\"|" \
             -e "s|build_sha = \"local\"|build_sha = \"${BUILD_SHA}\"|" \
-            -e "s|^workers_dev = true$|workers_dev = false\nroutes = [ { pattern = \"${CUSTOM_DOMAIN}\", custom_domain = true } ]|" \
+            -e "s|^workers_dev = true$|workers_dev = false\npreview_urls = false\nroutes = [ { pattern = \"${CUSTOM_DOMAIN}\", custom_domain = true } ]|" \
             wrangler.toml
           grep -qE '__[A-Z0-9_]+__' wrangler.toml && { echo '::error::wrangler.toml 仍有未注入占位符'; exit 1; } || true
           grep -q 'workers_dev = false' wrangler.toml || { echo '::error::routes/workers_dev 注入失败'; exit 1; }
@@ -134,89 +127,24 @@ jobs:
           [ "$rules" -le 100 ] || { echo '::error::run_worker_first 超过 Cloudflare 100 条上限'; exit 1; }
           grep -E '^run_worker_first' wrangler.toml | grep -q '"/assets/\*"' || { echo '::error::run_worker_first 缺少 /assets/* 兜底规则'; exit 1; }
 
+      - name: 检查现有部署的迁移边界
+        env:
+          BASE_URL: https://${{ vars.CUSTOM_DOMAIN }}
+          BUILD_SHA: ${{ github.sha }}
+          MIGRATIONS_APPLIED: ${{ github.event_name == 'workflow_dispatch' && inputs.migrations_applied }}
+        run: node scripts/check-production-migrations.mjs
+
       - name: 部署预演（dry-run）
         working-directory: apps/worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npx wrangler deploy --dry-run
 
-      - name: 清空线上 D1 与 KV（仅 reset_database=true）
-        if: github.event_name == 'workflow_dispatch' && inputs.reset_database
-        working-directory: apps/worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo '::warning::正在清空线上数据库与 KV'
-          npx wrangler d1 execute "$D1_NAME" --remote -y --file=scripts/drop-legacy.sql
-          npx wrangler kv key list --namespace-id "$KV_NAMESPACE_ID" > /tmp/kv-keys.json
-          count=$(jq 'length' /tmp/kv-keys.json)
-          if [ "$count" -gt 0 ]; then
-            jq -c '[.[].name]' /tmp/kv-keys.json > /tmp/kv-del.json
-            npx wrangler kv bulk delete /tmp/kv-del.json --namespace-id "$KV_NAMESPACE_ID" --force
-          fi
-          echo "已清空 D1 旧表与 $count 个 KV key"
-
-      - name: 记录 D1 回滚书签
-        if: github.event_name != 'workflow_dispatch' || !inputs.reset_database
-        working-directory: apps/worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          npx wrangler d1 time-travel info "$D1_NAME" --json > /tmp/d1-time-travel.json
-          bookmark=$(jq -r '.. | .bookmark? // empty' /tmp/d1-time-travel.json | head -n 1)
-          [ -n "$bookmark" ] || { echo '::error::未能取得 D1 Time Travel bookmark'; exit 1; }
-          echo "D1 rollback bookmark: $bookmark" >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice::D1 rollback bookmark 已写入 Job Summary"
-
-      - name: 应用数据库迁移
-        working-directory: apps/worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npx wrangler d1 migrations apply "$D1_NAME" --remote
-
       - name: 部署 Worker
         working-directory: apps/worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npx wrangler deploy
-
-      - name: 同步 Worker secrets
-        working-directory: apps/worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          CF_HOSTED_DOMAINS_TOKEN: ${{ secrets.CF_HOSTED_DOMAINS_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo "$JWT_SECRET" | npx wrangler secret put jwt_secret
-          # 可选：托管域名使用的站长 Cloudflare 凭据；未设置时功能保持隐藏
-          if [ -n "$CF_HOSTED_DOMAINS_TOKEN" ]; then
-            echo "$CF_HOSTED_DOMAINS_TOKEN" | npx wrangler secret put cf_api_token
-            echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put cf_account_id
-          else
-            echo '::notice::未设置 CF_HOSTED_DOMAINS_TOKEN，托管域名功能保持关闭'
-          fi
-
-      - name: 校验迁移完整性
-        working-directory: apps/worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          expected=$(ls migrations/*.sql | wc -l)
-          applied=$(npx wrangler d1 execute "$D1_NAME" --remote --json \
-            --command 'SELECT COUNT(*) AS c FROM d1_migrations' | jq '.[0].results[0].c')
-          echo "migrations: 代码 $expected / 线上 $applied"
-          [ "$expected" = "$applied" ] || { echo '::error::线上迁移数与代码不一致'; exit 1; }
-
-      - name: 引导管理员账号（幂等）
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-        run: node apps/worker/scripts/seed-admin.mjs
+        run: npx wrangler deploy --keep-vars
 
       - name: 等待新版本全球生效
         env:
@@ -235,9 +163,7 @@ jobs:
           echo '::error::240s 内新版本未生效'
           exit 1
 
-      - name: 线上冒烟
+      - name: 公开边界冒烟
         env:
           BASE_URL: https://${{ vars.CUSTOM_DOMAIN }}
-          ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-        run: bash scripts/smoke.sh
+        run: node scripts/check-production-boundaries.mjs
